@@ -1,0 +1,614 @@
+﻿#Include "TOTVS.ch"
+#Include "RESTFUL.ch"
+#INCLUDE "FWMVCDEF.CH"
+#INCLUDE "TLPP-CORE.TH"
+#INCLUDE "TLPP-REST.TH"
+
+Class TStockControlRest
+
+    Public Data nCodigoHttp   as Integer
+    Public Data cCorpoRetorno as Character
+    Public Data jResposta     as Json
+
+    Public Method New() Constructor
+
+    @Get("/protheus/v1/stock-control/ping")
+    Public Method Ping()
+
+    @Post("/protheus/v1/stock-control/custos")
+    Public Method ConsultarCustos()
+
+    @Post("/protheus/v1/stock-control/precos-periodo")
+    Public Method ConsultarPrecosPeriodo()
+
+    @Get("/protheus/v1/stock-control/produto/:codigo")
+    Public Method BuscarProduto()
+
+    @Get("/protheus/v1/stock-control/grupo/:grupo")
+    Public Method BuscarGrupo()
+
+    Private Method GetMockMovements()
+    Private Method ApplyFilters(aBase, cDataInicial, cDataFinal, cGrupoPai, cTermo)
+    Private Method BuildGroupSummary(aMovs)
+    Private Method BuildProductSummary(aMovs)
+    Private Method NormalizeDate(cDate)
+    Private Method FindGroupIndex(aResult, cGrupo)
+    Private Method FindProductIndex(aResult, cGrupo, cCodProduto)
+    Private Method BuildGroupSummaryFromProduct(aProdRows)
+
+EndClass
+
+Method New() Class TStockControlRest
+Return Self
+
+Method Ping() Class TStockControlRest
+
+    Local jHeader := JsonObject():New() as Json
+
+    ::jResposta := JsonObject():New()
+    ::jResposta["ok"] := .T.
+    ::jResposta["versaoApi"] := "stock-control-2026-02-12-v3"
+    ::jResposta["message"] := "stock-control online"
+
+    jHeader:FromJson('{"Content-Type":"application/json; charset=utf-8"}')
+    oRest:SetHeaderResponse(jHeader)
+    oRest:SetStatusCode(200)
+    oRest:SetResponse(EncodeUTF8(::jResposta:ToJson()))
+
+Return .T.
+
+Method BuscarProduto() Class TStockControlRest
+
+    Local jHeader   := JsonObject():New() as Json
+    Local jPath     := oRest:GetPathParamsRequest() as Json
+    Local cCodigo   := Upper(AllTrim(jPath["codigo"]))
+    Local cGrupo    := ""
+    Local cAliasSB1 := GetNextAlias()
+    Local jDados    := JsonObject():New() as Json
+
+    ::jResposta := JsonObject():New()
+    ::jResposta["ok"] := .T.
+    ::jResposta["versaoApi"] := "stock-control-2026-02-12-v3"
+
+    BeginSql Alias cAliasSB1
+        SELECT
+            SB1.B1_COD   AS CODIGO,
+            SB1.B1_DESC  AS DESCRICAO,
+            SB1.B1_GRUPO AS GRUPO
+        FROM
+            %Table:SB1% SB1
+        WHERE
+            SB1.%NotDel%
+            AND SB1.B1_FILIAL = %xFilial:SB1%
+            AND SB1.B1_COD = %Exp:cCodigo%
+    EndSql
+
+    (cAliasSB1)->(DbGoTop())
+
+    If (cAliasSB1)->(Eof())
+        ::jResposta["ok"] := .F.
+        ::jResposta["message"] := "Produto nao encontrado."
+        oRest:SetStatusCode(404)
+    Else
+        cGrupo := AllTrim((cAliasSB1)->GRUPO)
+
+        jDados["codigo"] := AllTrim((cAliasSB1)->CODIGO)
+        jDados["descricao"] := AllTrim((cAliasSB1)->DESCRICAO)
+        jDados["grupo"] := cGrupo
+        ::jResposta["dados"] := jDados
+        oRest:SetStatusCode(200)
+    EndIf
+
+    (cAliasSB1)->(DbCloseArea())
+
+    jHeader:FromJson('{"Content-Type":"application/json; charset=utf-8"}')
+    oRest:SetHeaderResponse(jHeader)
+    oRest:SetResponse(EncodeUTF8(::jResposta:ToJson()))
+
+Return .T.
+
+Method BuscarGrupo() Class TStockControlRest
+
+    Local jHeader   := JsonObject():New() as Json
+    Local jPath     := oRest:GetPathParamsRequest() as Json
+    Local cGrupo    := Upper(AllTrim(jPath["grupo"]))
+    Local cAliasSBM := GetNextAlias()
+    Local jDados    := JsonObject():New() as Json
+
+    ::jResposta := JsonObject():New()
+    ::jResposta["ok"] := .T.
+    ::jResposta["versaoApi"] := "stock-control-2026-02-12-v3"
+
+    BeginSql Alias cAliasSBM
+        SELECT
+            SBM.BM_GRUPO AS GRUPO,
+            SBM.BM_DESC  AS DESCRICAO
+        FROM
+            %Table:SBM% SBM
+        WHERE
+            SBM.%NotDel%
+            AND SBM.BM_FILIAL = %xFilial:SBM%
+            AND SBM.BM_GRUPO = %Exp:cGrupo%
+    EndSql
+
+    (cAliasSBM)->(DbGoTop())
+
+    If (cAliasSBM)->(Eof())
+        ::jResposta["ok"] := .F.
+        ::jResposta["message"] := "Grupo nao encontrado."
+        oRest:SetStatusCode(404)
+    Else
+        jDados["grupo"] := AllTrim((cAliasSBM)->GRUPO)
+        jDados["descricao"] := AllTrim((cAliasSBM)->DESCRICAO)
+        ::jResposta["dados"] := jDados
+        oRest:SetStatusCode(200)
+    EndIf
+
+    (cAliasSBM)->(DbCloseArea())
+
+    jHeader:FromJson('{"Content-Type":"application/json; charset=utf-8"}')
+    oRest:SetHeaderResponse(jHeader)
+    oRest:SetResponse(EncodeUTF8(::jResposta:ToJson()))
+
+Return .T.
+
+Method ConsultarPrecosPeriodo() Class TStockControlRest
+
+    Local jHeader       := JsonObject():New() as Json
+    Local jBody         := JsonObject():New() as Json
+    Local cDataInicial  := ""
+    Local cDataFinal    := ""
+    Local cGrupoPai     := "TODOS"
+    Local cTipo         := "TODOS"
+    Local cControleEst  := "TODOS"
+    Local cTermo        := ""
+    Local cAliasPreco   := GetNextAlias()
+    Local aPrecoProduto := {}
+    Local cGrupoLinha   := ""
+    Local cGrupoVazio   := "__EMPTY_GROUP__"
+    Local cTipoVazio    := "__EMPTY_TYPE__"
+    Local cTipoSemTipo  := "SEM_TIPO"
+
+    ::jResposta := JsonObject():New()
+    ::jResposta["ok"] := .T.
+    ::jResposta["versaoApi"] := "stock-control-2026-02-12-v3"
+
+    jBody:FromJson(oRest:GetBodyRequest())
+
+    If jBody <> Nil
+        If !Empty(jBody["dataInicial"])
+            cDataInicial := ::NormalizeDate(jBody:GetJsonText("dataInicial"))
+        EndIf
+
+        If !Empty(jBody["dataFinal"])
+            cDataFinal := ::NormalizeDate(jBody:GetJsonText("dataFinal"))
+        EndIf
+
+        If !Empty(jBody["grupoPai"])
+            cGrupoPai := Upper(AllTrim(jBody:GetJsonText("grupoPai")))
+        EndIf
+
+        If !Empty(jBody["tipo"])
+            cTipo := Upper(AllTrim(jBody:GetJsonText("tipo")))
+        EndIf
+
+        If !Empty(jBody["controleEstoque"])
+            cControleEst := Upper(AllTrim(jBody:GetJsonText("controleEstoque")))
+        EndIf
+
+        If !Empty(jBody["termoProduto"])
+            cTermo := Upper(AllTrim(jBody:GetJsonText("termoProduto")))
+        EndIf
+    EndIf
+
+    If Empty(cDataInicial)
+        cDataInicial := "19000101"
+    EndIf
+
+    If Empty(cDataFinal)
+        cDataFinal := "29991231"
+    EndIf
+
+    BeginSql Alias cAliasPreco
+        SELECT
+            LTRIM(RTRIM(ISNULL(SB1.B1_GRUPO, ''))) AS GRUPO,
+            ISNULL(NULLIF(LTRIM(RTRIM(SBM.BM_DESC)), ''), 'Sem descricao') AS GRUPODESC,
+            UPPER(ISNULL(NULLIF(LTRIM(RTRIM(SB1.B1_TIPO)), ''), 'NA')) AS TIPOPROD,
+            SD1.D1_COD   AS CODPROD,
+            SB1.B1_DESC  AS PRODUTO,
+            ISNULL(SB1.B1_EMIN, 0) AS EMIN,
+            ISNULL(SB1.B1_EMAX, 0) AS ESTMAX,
+            ISNULL(SB1.B1_LOCALIZ, '') AS LOCALIZ,
+            ISNULL(SB1.B1_ZLOCALI, '') AS ZLOCALI,
+            ISNULL(SB1.B1_RASTRO, '') AS RASTRO,
+            ISNULL(SB1.B1_XCAEPI, '') AS XCAEPI,
+            ISNULL(SB1.B1_MRP, '') AS MRP,
+            MIN(CASE
+                WHEN ISNULL(SD1.D1_VUNIT, 0) > 0
+                    THEN ISNULL(SD1.D1_VUNIT, 0)
+                WHEN ISNULL(SD1.D1_QUANT, 0) > 0
+                    THEN ISNULL(SD1.D1_TOTAL, 0) / SD1.D1_QUANT
+                ELSE 0
+            END) AS MENORPRECO,
+            MAX(CASE
+                WHEN ISNULL(SD1.D1_VUNIT, 0) > 0
+                    THEN ISNULL(SD1.D1_VUNIT, 0)
+                WHEN ISNULL(SD1.D1_QUANT, 0) > 0
+                    THEN ISNULL(SD1.D1_TOTAL, 0) / SD1.D1_QUANT
+                ELSE 0
+            END) AS MAIORPRECO,
+            MIN(SD1.D1_EMISSAO) AS DATAPRIMEIRA,
+            MAX(SD1.D1_EMISSAO) AS DATAULTIMA,
+            COUNT(*) AS QTDMOV
+        FROM
+            %Table:SD1% SD1
+        INNER JOIN %Table:SB1% SB1
+            ON SB1.B1_COD = SD1.D1_COD
+            AND SB1.B1_FILIAL = %xFilial:SB1%
+            AND SB1.%NotDel%
+            AND LTRIM(RTRIM(ISNULL(SB1.B1_MSBLQL, ''))) IN ('', '2')
+        LEFT JOIN (
+            SELECT
+                BM_GRUPO,
+                MAX(BM_DESC) AS BM_DESC
+            FROM
+                %Table:SBM%
+            WHERE
+                D_E_L_E_T_ = ' '
+                AND (BM_FILIAL = %xFilial:SBM% OR BM_FILIAL = '  ')
+            GROUP BY
+                BM_GRUPO
+        ) SBM
+            ON SBM.BM_GRUPO = SB1.B1_GRUPO
+        WHERE
+            SD1.%NotDel%
+            AND SD1.D1_FILIAL = %xFilial:SD1%
+            AND SD1.D1_EMISSAO BETWEEN %Exp:cDataInicial% AND %Exp:cDataFinal%
+            AND (
+                %Exp:cGrupoPai% = 'TODOS'
+                OR (%Exp:cGrupoPai% = %Exp:cGrupoVazio% AND LTRIM(RTRIM(ISNULL(SB1.B1_GRUPO, ''))) = '')
+                OR LTRIM(RTRIM(ISNULL(SB1.B1_GRUPO, ''))) = %Exp:cGrupoPai%
+            )
+            AND (
+                %Exp:cTipo% = 'TODOS'
+                OR ((%Exp:cTipo% = %Exp:cTipoVazio% OR %Exp:cTipo% = %Exp:cTipoSemTipo%) AND LTRIM(RTRIM(ISNULL(SB1.B1_TIPO, ''))) = '')
+                OR UPPER(ISNULL(SB1.B1_TIPO, '')) = %Exp:cTipo%
+            )
+            AND (
+                %Exp:cControleEst% = 'TODOS'
+                OR (
+                    %Exp:cControleEst% = 'ESTOQUE'
+                    AND ISNULL(SB1.B1_EMIN, 0) > 0
+                )
+                OR (
+                    %Exp:cControleEst% = 'NAO_ESTOQUE'
+                    AND ISNULL(SB1.B1_EMIN, 0) <= 0
+                )
+            )
+            AND (
+                %Exp:cTermo% = ''
+                OR UPPER(SB1.B1_DESC) LIKE '%' + %Exp:cTermo% + '%'
+                OR UPPER(SD1.D1_COD) LIKE '%' + %Exp:cTermo% + '%'
+            )
+            AND (ISNULL(SD1.D1_VUNIT, 0) > 0 OR ISNULL(SD1.D1_QUANT, 0) > 0)
+        GROUP BY
+            LTRIM(RTRIM(ISNULL(SB1.B1_GRUPO, ''))),
+            ISNULL(NULLIF(LTRIM(RTRIM(SBM.BM_DESC)), ''), 'Sem descricao'),
+            UPPER(ISNULL(NULLIF(LTRIM(RTRIM(SB1.B1_TIPO)), ''), 'NA')),
+            SD1.D1_COD,
+            SB1.B1_DESC,
+            ISNULL(SB1.B1_EMIN, 0),
+            ISNULL(SB1.B1_EMAX, 0),
+            ISNULL(SB1.B1_LOCALIZ, ''),
+            ISNULL(SB1.B1_ZLOCALI, ''),
+            ISNULL(SB1.B1_RASTRO, ''),
+            ISNULL(SB1.B1_XCAEPI, ''),
+            ISNULL(SB1.B1_MRP, '')
+        ORDER BY
+            1,
+            4
+    EndSql
+
+    (cAliasPreco)->(DbGoTop())
+    While (cAliasPreco)->(!Eof())
+
+        cGrupoLinha := AllTrim((cAliasPreco)->GRUPO)
+
+        AAdd(aPrecoProduto, { ;
+            "grupo": cGrupoLinha, ;
+            "grupoDescricao": AllTrim((cAliasPreco)->GRUPODESC), ;
+            "tipoProduto": AllTrim((cAliasPreco)->TIPOPROD), ;
+            "codProduto": AllTrim((cAliasPreco)->CODPROD), ;
+            "produto": AllTrim((cAliasPreco)->PRODUTO), ;
+            "b1Emin": (cAliasPreco)->EMIN, ;
+            "b1Emax": (cAliasPreco)->ESTMAX, ;
+            "b1Localiz": AllTrim((cAliasPreco)->LOCALIZ), ;
+            "b1Zlocali": AllTrim((cAliasPreco)->ZLOCALI), ;
+            "b1Rastro": AllTrim((cAliasPreco)->RASTRO), ;
+            "b1Xcaepi": AllTrim((cAliasPreco)->XCAEPI), ;
+            "b1Mrp": AllTrim((cAliasPreco)->MRP), ;
+            "menorPreco": (cAliasPreco)->MENORPRECO, ;
+            "maiorPreco": (cAliasPreco)->MAIORPRECO, ;
+            "variacao": ((cAliasPreco)->MAIORPRECO - (cAliasPreco)->MENORPRECO), ;
+            "qtdMov": (cAliasPreco)->QTDMOV, ;
+            "dataPrimeiraCompra": StoD((cAliasPreco)->DATAPRIMEIRA), ;
+            "dataUltimaCompra": StoD((cAliasPreco)->DATAULTIMA) ;
+        })
+
+        (cAliasPreco)->(DbSkip())
+    EndDo
+    (cAliasPreco)->(DbCloseArea())
+
+    ::jResposta["filtros"] := { ;
+        "dataInicial": cDataInicial, ;
+        "dataFinal": cDataFinal, ;
+        "grupoPai": cGrupoPai, ;
+        "tipo": cTipo, ;
+        "controleEstoque": cControleEst, ;
+        "termoProduto": cTermo ;
+    }
+    ::jResposta["resumoProduto"] := aPrecoProduto
+    ::jResposta["resumoGrupo"] := ::BuildGroupSummaryFromProduct(aPrecoProduto)
+
+    jHeader:FromJson('{"Content-Type":"application/json; charset=utf-8"}')
+    oRest:SetHeaderResponse(jHeader)
+    oRest:SetStatusCode(200)
+    oRest:SetResponse(EncodeUTF8(::jResposta:ToJson()))
+
+Return .T.
+
+Method ConsultarCustos() Class TStockControlRest
+
+    Local jHeader      := JsonObject():New() as Json
+    Local jBody        := JsonObject():New() as Json
+    Local cDataInicial := ""
+    Local cDataFinal   := ""
+    Local cGrupoPai    := "TODOS"
+    Local cTermo       := ""
+    Local aBase        := {}
+    Local aMovs        := {}
+
+    ::jResposta := JsonObject():New()
+    ::jResposta["ok"] := .T.
+
+    jBody:FromJson(oRest:GetBodyRequest())
+
+    If jBody <> Nil
+
+        If !Empty(jBody["dataInicial"])
+            cDataInicial := ::NormalizeDate(jBody:GetJsonText("dataInicial"))
+        EndIf
+
+        If !Empty(jBody["dataFinal"])
+            cDataFinal := ::NormalizeDate(jBody:GetJsonText("dataFinal"))
+        EndIf
+
+        If !Empty(jBody["grupoPai"])
+            cGrupoPai := Upper(AllTrim(jBody:GetJsonText("grupoPai")))
+        EndIf
+
+        If !Empty(jBody["termoProduto"])
+            cTermo := Upper(AllTrim(jBody:GetJsonText("termoProduto")))
+        EndIf
+
+    EndIf
+
+    If Empty(cDataInicial)
+        cDataInicial := "19000101"
+    EndIf
+
+    If Empty(cDataFinal)
+        cDataFinal := "29991231"
+    EndIf
+
+    aBase := ::GetMockMovements()
+    aMovs := ::ApplyFilters(aBase, cDataInicial, cDataFinal, cGrupoPai, cTermo)
+
+    ::jResposta["filtros"] := { ;
+        "dataInicial": cDataInicial, ;
+        "dataFinal": cDataFinal, ;
+        "grupoPai": cGrupoPai, ;
+        "termoProduto": cTermo ;
+    }
+
+    ::jResposta["movimentacoes"] := aMovs
+    ::jResposta["resumoGrupo"] := ::BuildGroupSummary(aMovs)
+    ::jResposta["resumoProduto"] := ::BuildProductSummary(aMovs)
+
+    jHeader:FromJson('{"Content-Type":"application/json; charset=utf-8"}')
+    oRest:SetHeaderResponse(jHeader)
+    oRest:SetStatusCode(200)
+    oRest:SetResponse(EncodeUTF8(::jResposta:ToJson()))
+
+Return .T.
+
+Method GetMockMovements() Class TStockControlRest
+
+    Local aDados := {}
+
+    AAdd(aDados, {"data": "20260105", "grupo": "ACO",      "codProduto": "ACO-001", "produto": "Chapa Aco 3mm",         "custo": 18.30})
+    AAdd(aDados, {"data": "20260109", "grupo": "ACO",      "codProduto": "ACO-001", "produto": "Chapa Aco 3mm",         "custo": 19.10})
+    AAdd(aDados, {"data": "20260113", "grupo": "ACO",      "codProduto": "ACO-002", "produto": "Tubo Galvanizado 1pol", "custo": 124.80})
+    AAdd(aDados, {"data": "20260120", "grupo": "ACO",      "codProduto": "ACO-002", "produto": "Tubo Galvanizado 1pol", "custo": 121.70})
+    AAdd(aDados, {"data": "20260124", "grupo": "ACO",      "codProduto": "ACO-003", "produto": "Perfil U 2mm",          "custo": 32.40})
+    AAdd(aDados, {"data": "20260202", "grupo": "ELETRICO", "codProduto": "ELE-001", "produto": "Cabo Flexivel 2.5mm",   "custo": 2.40})
+    AAdd(aDados, {"data": "20260203", "grupo": "ELETRICO", "codProduto": "ELE-001", "produto": "Cabo Flexivel 2.5mm",   "custo": 2.75})
+    AAdd(aDados, {"data": "20260205", "grupo": "ELETRICO", "codProduto": "ELE-002", "produto": "Disjuntor 40A",         "custo": 48.90})
+    AAdd(aDados, {"data": "20260208", "grupo": "ELETRICO", "codProduto": "ELE-002", "produto": "Disjuntor 40A",         "custo": 47.20})
+    AAdd(aDados, {"data": "20260210", "grupo": "PINTURA",  "codProduto": "PIN-001", "produto": "Tinta Epoxi Azul",      "custo": 39.90})
+    AAdd(aDados, {"data": "20260211", "grupo": "PINTURA",  "codProduto": "PIN-001", "produto": "Tinta Epoxi Azul",      "custo": 41.35})
+    AAdd(aDados, {"data": "20260212", "grupo": "PINTURA",  "codProduto": "PIN-002", "produto": "Primer Anticorrosivo",  "custo": 29.40})
+
+Return aDados
+
+Method ApplyFilters(aBase, cDataInicial, cDataFinal, cGrupoPai, cTermo) Class TStockControlRest
+
+    Local aOut   := {}
+    Local nI     := 0
+    Local jItem  := Nil
+    Local lDate  := .F.
+    Local lGroup := .F.
+    Local lTerm  := .F.
+
+    For nI := 1 To Len(aBase)
+
+        jItem := aBase[nI]
+
+        lDate := (jItem["data"] >= cDataInicial .And. jItem["data"] <= cDataFinal)
+        lGroup := (cGrupoPai == "TODOS" .Or. jItem["grupo"] == cGrupoPai)
+
+        If Empty(cTermo)
+            lTerm := .T.
+        Else
+            lTerm := (At(cTermo, Upper(jItem["produto"])) > 0 .Or. At(cTermo, Upper(jItem["codProduto"])) > 0)
+        EndIf
+
+        If lDate .And. lGroup .And. lTerm
+            AAdd(aOut, jItem)
+        EndIf
+
+    Next
+
+Return aOut
+
+Method BuildGroupSummary(aMovs) Class TStockControlRest
+
+    Local aResult := {}
+    Local nI      := 0
+    Local nPos    := 0
+    Local jItem   := Nil
+
+    For nI := 1 To Len(aMovs)
+
+        jItem := aMovs[nI]
+        nPos := ::FindGroupIndex(aResult, jItem["grupo"])
+
+        If nPos == 0
+            AAdd(aResult, { ;
+                "grupo": jItem["grupo"], ;
+                "menorCusto": jItem["custo"], ;
+                "maiorCusto": jItem["custo"], ;
+                "qtdMov": 0 ;
+            })
+            nPos := Len(aResult)
+        EndIf
+
+        aResult[nPos]["qtdMov"] += 1
+        aResult[nPos]["menorCusto"] := Min(aResult[nPos]["menorCusto"], jItem["custo"])
+        aResult[nPos]["maiorCusto"] := Max(aResult[nPos]["maiorCusto"], jItem["custo"])
+
+    Next
+
+    For nI := 1 To Len(aResult)
+        aResult[nI]["variacao"] := aResult[nI]["maiorCusto"] - aResult[nI]["menorCusto"]
+    Next
+
+Return aResult
+
+Method BuildProductSummary(aMovs) Class TStockControlRest
+
+    Local aResult := {}
+    Local nI      := 0
+    Local nPos    := 0
+    Local jItem   := Nil
+
+    For nI := 1 To Len(aMovs)
+
+        jItem := aMovs[nI]
+        nPos := ::FindProductIndex(aResult, jItem["grupo"], jItem["codProduto"])
+
+        If nPos == 0
+            AAdd(aResult, { ;
+                "grupo": jItem["grupo"], ;
+                "codProduto": jItem["codProduto"], ;
+                "produto": jItem["produto"], ;
+                "menorCusto": jItem["custo"], ;
+                "maiorCusto": jItem["custo"], ;
+                "qtdMov": 0 ;
+            })
+            nPos := Len(aResult)
+        EndIf
+
+        aResult[nPos]["qtdMov"] += 1
+        aResult[nPos]["menorCusto"] := Min(aResult[nPos]["menorCusto"], jItem["custo"])
+        aResult[nPos]["maiorCusto"] := Max(aResult[nPos]["maiorCusto"], jItem["custo"])
+
+    Next
+
+    For nI := 1 To Len(aResult)
+        aResult[nI]["variacao"] := aResult[nI]["maiorCusto"] - aResult[nI]["menorCusto"]
+    Next
+
+Return aResult
+
+Method NormalizeDate(cDate) Class TStockControlRest
+
+    Local cOut := AllTrim(cDate)
+
+    cOut := StrTran(cOut, "-", "")
+    cOut := StrTran(cOut, "/", "")
+
+Return cOut
+
+Method FindGroupIndex(aResult, cGrupo) Class TStockControlRest
+
+    Local nI := 0
+
+    For nI := 1 To Len(aResult)
+        If aResult[nI]["grupo"] == cGrupo
+            Return nI
+        EndIf
+    Next
+
+Return 0
+
+Method BuildGroupSummaryFromProduct(aProdRows) Class TStockControlRest
+
+    Local aResult := {}
+    Local nI      := 0
+    Local nPos    := 0
+    Local jItem   := Nil
+
+    For nI := 1 To Len(aProdRows)
+
+        jItem := aProdRows[nI]
+        nPos := ::FindGroupIndex(aResult, jItem["grupo"])
+
+        If nPos == 0
+            AAdd(aResult, { ;
+                "grupo": jItem["grupo"], ;
+                "grupoDescricao": jItem["grupoDescricao"], ;
+                "menorPreco": jItem["menorPreco"], ;
+                "maiorPreco": jItem["maiorPreco"], ;
+                "qtdProdutos": 0, ;
+                "qtdMov": 0 ;
+            })
+            nPos := Len(aResult)
+        EndIf
+
+        aResult[nPos]["qtdProdutos"] += 1
+        aResult[nPos]["qtdMov"] += jItem["qtdMov"]
+        aResult[nPos]["menorPreco"] := Min(aResult[nPos]["menorPreco"], jItem["menorPreco"])
+        aResult[nPos]["maiorPreco"] := Max(aResult[nPos]["maiorPreco"], jItem["maiorPreco"])
+
+    Next
+
+    For nI := 1 To Len(aResult)
+        aResult[nI]["variacao"] := aResult[nI]["maiorPreco"] - aResult[nI]["menorPreco"]
+    Next
+
+Return aResult
+
+Method FindProductIndex(aResult, cGrupo, cCodProduto) Class TStockControlRest
+
+    Local nI := 0
+
+    For nI := 1 To Len(aResult)
+        If aResult[nI]["grupo"] == cGrupo .And. aResult[nI]["codProduto"] == cCodProduto
+            Return nI
+        EndIf
+    Next
+
+Return 0
+
+

@@ -1,0 +1,22 @@
+#include "protheus.ch"
+#INCLUDE 'totvs.ch'
+#INCLUDE 'restful.ch'
+#INCLUDE "topconn.ch"
+
+User Function StockControl()
+
+    FwCallApp("stock-contol-vue")
+
+Return
+
+User Function testStockControl()
+
+    RpcClearenv()
+    RPCSetType(3)
+    RpcSetEnv('02')
+
+    u_StockControl()
+
+    RpcClearEnv()
+
+Return
